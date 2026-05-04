@@ -1,0 +1,22 @@
+{
+  "name": "patrick",
+  "version": "0.2.0",
+  "description": "Patrick — ChatGPT destekli, hafızalı, web UI'lı akıllı terminal asistanı",
+  "type": "module",
+  "bin": {
+    "patrick": "./bin/patrick.js",
+    "p": "./bin/patrick.js"
+  },
+  "scripts": {
+    "start": "node bin/patrick.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "openai": "^6.35.0",
+    "dotenv": "^16.4.5",
+    "picocolors": "^1.1.1",
+    "ws": "^8.18.0"
+  }
+}

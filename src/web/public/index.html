@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="tr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Patrick</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="dot"></span>
+        <strong>Patrick</strong>
+        <span class="muted">terminal asistanı</span>
+      </div>
+      <div class="meta">
+        <span id="model" class="pill">gpt-4o</span>
+        <span id="cwd" class="pill mono"></span>
+        <span id="status" class="pill warn">bağlanıyor…</span>
+      </div>
+    </header>
+
+    <main id="chat" class="chat"></main>
+
+    <footer class="composer">
+      <textarea
+        id="input"
+        rows="2"
+        placeholder="Patrick'e bir şey sor… (Enter gönderir, Shift+Enter yeni satır)"
+        autofocus
+      ></textarea>
+      <button id="send">Gönder</button>
+    </footer>
+
+    <div id="approval-overlay" class="overlay hidden">
+      <div class="modal">
+        <h3 id="approval-title">Onay isteniyor</h3>
+        <pre id="approval-body" class="mono"></pre>
+        <div class="actions">
+          <button id="approve-no" class="btn-no">Hayır</button>
+          <button id="approve-yes" class="btn-yes">Evet</button>
+          <button id="approve-always" class="btn-always" hidden>Her zaman</button>
+        </div>
+      </div>
+    </div>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
