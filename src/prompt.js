@@ -1,7 +1,8 @@
 import os from "node:os";
 import { loadMemory } from "./state.js";
 
-export function buildSystemPrompt() {
+export function buildSystemPrompt(config = {}) {
+  const memLimit = config.memoryInjectLimit || 30;
   const ctx = {
     user: os.userInfo().username,
     host: os.hostname(),
@@ -15,7 +16,7 @@ export function buildSystemPrompt() {
   const mem = loadMemory();
   const memoryBlock = mem.notes.length
     ? `\n# Önceki Oturumlardan Hatırladıkların\n` +
-      mem.notes.slice(-30).map((n) => `- (${n.id}) ${n.text}`).join("\n") +
+      mem.notes.slice(-memLimit).map((n) => `- (${n.id}) ${n.text}`).join("\n") +
       `\n\nGerekirse bu notlardan yararlan; ama her cevapta bahsetmek zorunda değilsin. Yeni bir kalıcı bilgi öğrendiğinde memory_remember tool'u ile kaydet.\n`
     : `\nHafızan henüz boş. Kullanıcı bir tercih, kısaltma ya da kişisel proje yolu paylaşırsa memory_remember ile kaydet.\n`;
 

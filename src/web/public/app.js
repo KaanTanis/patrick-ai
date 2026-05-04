@@ -15,13 +15,24 @@ const btnAlways = $("#approve-always");
 let ws;
 let currentApproval = null;
 
+function getToken() {
+  return new URLSearchParams(location.search).get("token") || "";
+}
+
 function connect() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
-  ws = new WebSocket(`${proto}://${location.host}`);
+  ws = new WebSocket(`${proto}://${location.host}/ws`);
+  const token = getToken();
   ws.addEventListener("open", () => {
+    if (!token) { setStatus("bad", "token yok — URL'de ?token=… eksik"); return; }
+    ws.send(JSON.stringify({ type: "auth", token }));
     setStatus("ok", "bağlı");
   });
-  ws.addEventListener("close", () => {
+  ws.addEventListener("close", (ev) => {
+    if (ev.code === 1008) {
+      setStatus("bad", "yetkisiz — geçerli token ile aç");
+      return;
+    }
     setStatus("bad", "bağlantı koptu — yeniden deniyor");
     setTimeout(connect, 1500);
   });
