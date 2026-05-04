@@ -19,6 +19,53 @@ function getToken() {
   return new URLSearchParams(location.search).get("token") || "";
 }
 
+// Persistence: sessionId → cursor map'i localStorage'da tutarız.
+// Aynı patrick oturumuna ikinci kez bağlanınca yerinden devam ederiz.
+const STORAGE_KEY = "patrick.cursors.v1";
+function loadCursor(sessionId) {
+  try {
+    const m = JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
+    return Number(m[sessionId] || 0);
+  } catch { return 0; }
+}
+function saveCursor(sessionId, cursor) {
+  try {
+    const m = JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
+    m[sessionId] = cursor;
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(m));
+  } catch {}
+}
+
+let currentSessionId = null;
+let currentCursor = 0;
+
+async function fetchAndReplay(sessionId, fromCursor) {
+  const token = getToken();
+  if (!token) return;
+  try {
+    const r = await fetch(`/api/events?token=${encodeURIComponent(token)}&cursor=${fromCursor}`);
+    if (!r.ok) { console.warn("replay HTTP", r.status); return; }
+    const { events, cursor } = await r.json();
+    if (!events?.length) {
+      currentCursor = cursor;
+      return;
+    }
+    if (fromCursor === 0 && events.length > 0) {
+      // Tam replay: sayfa baştan açılıyor; "geçmiş" bilgi notu
+      const note = document.createElement("div");
+      note.className = "event";
+      note.textContent = `↻ ${events.length} önceki olay yüklendi`;
+      chat.appendChild(note);
+    }
+    for (const ev of events) handle(ev);
+    currentCursor = cursor;
+    saveCursor(sessionId, cursor);
+    scrollBottom();
+  } catch (err) {
+    console.warn("replay başarısız:", err);
+  }
+}
+
 function connect() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   ws = new WebSocket(`${proto}://${location.host}/ws`);
@@ -49,17 +96,60 @@ function setStatus(cls, text) {
   status.textContent = text;
 }
 
+// Şu an akış halinde olan assistant DIV'i (chunk'lar buraya append edilir)
+let currentAssistantEl = null;
+
 function handle(m) {
+  // Server bu event'i persist ettiyse cursor field'ı dolu gelir.
+  // O zaman localStorage'daki ilerlemeyi kaydet.
+  if (typeof m.cursor === "number" && currentSessionId) {
+    currentCursor = m.cursor;
+    saveCursor(currentSessionId, currentCursor);
+  }
   switch (m.type) {
-    case "hello":
+    case "hello": {
       cwdEl.textContent = m.payload.cwd;
       modelEl.textContent = m.payload.model;
+
+      const incomingSession = m.payload.sessionId;
+      const headCursor = m.payload.cursor || 0;
+      if (incomingSession && incomingSession !== currentSessionId) {
+        // Yeni patrick oturumu (yeniden başlatılmış olabilir).
+        // localStorage'da bu session için cursor varsa oradan, yoksa baştan replay et.
+        currentSessionId = incomingSession;
+        const lastSeen = loadCursor(incomingSession);
+        const fromCursor = Math.min(lastSeen, headCursor);
+        fetchAndReplay(incomingSession, fromCursor);
+      } else if (incomingSession) {
+        // Reconnect — sadece kaçırılan event'leri al
+        fetchAndReplay(incomingSession, currentCursor);
+      }
       break;
+    }
     case "user":
+      currentAssistantEl = null; // user yeni tur açtı, mevcut akış sonlandı
       addMessage("user", "siz", m.payload.text);
       break;
+    case "assistant:start":
+      // Boş bir assistant balonu aç; chunk'lar bunun içine akacak
+      currentAssistantEl = addMessage("assistant", "patrick", "");
+      currentAssistantEl.classList.add("streaming");
+      break;
+    case "assistant:chunk":
+      if (!currentAssistantEl) {
+        currentAssistantEl = addMessage("assistant", "patrick", "");
+        currentAssistantEl.classList.add("streaming");
+      }
+      currentAssistantEl.querySelector(".body").textContent += m.payload.delta;
+      break;
+    case "assistant:done":
+      if (currentAssistantEl) currentAssistantEl.classList.remove("streaming");
+      currentAssistantEl = null;
+      break;
     case "assistant:text":
-      addMessage("assistant", "patrick", m.payload.text);
+      // Backward compat: streaming yoksa final tam metin gelir.
+      // Streaming varsa zaten chunk'lardan inşa edildi; bu event'i yoksay.
+      if (!currentAssistantEl) addMessage("assistant", "patrick", m.payload.text);
       break;
     case "shell:propose":
       addToolCard("run_shell", m.payload, { proposal: true });
@@ -103,6 +193,7 @@ function addMessage(kind, who, text) {
   div.querySelector(".who").textContent = who;
   div.querySelector(".body").textContent = text;
   chat.appendChild(div);
+  return div;
 }
 
 function addToolCard(name, payload, { proposal }) {

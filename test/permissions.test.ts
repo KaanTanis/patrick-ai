@@ -1,6 +1,3 @@
-// Kalıcı izin pattern üretici testleri.
-// Çalıştır: node --test test/permissions.test.js
-
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { suggestPermissionPattern } from "../src/state.js";
@@ -15,7 +12,6 @@ test("suggestPermissionPattern: 2+ tokenlı komutlarda kuyruğu serbest bırakı
 
 test("suggestPermissionPattern: regex meta-karakterlerini escape eder", () => {
   const p = suggestPermissionPattern("rm temp.txt");
-  // Beklenen: ^rm temp\.txt$
   assert.match(p, /^\^rm temp\\\.txt\$$/);
 });
 

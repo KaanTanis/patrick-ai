@@ -57,6 +57,16 @@ body { display: flex; flex-direction: column; }
   letter-spacing: 0.5px; }
 .msg .body { white-space: pre-wrap; word-wrap: break-word; }
 
+/* Streaming: aktif assistant balonunda yanıp sönen cursor */
+.msg.streaming .body::after {
+  content: "▍";
+  display: inline-block;
+  margin-left: 1px;
+  color: var(--magenta);
+  animation: blink 1s steps(2, end) infinite;
+}
+@keyframes blink { 50% { opacity: 0; } }
+
 .tool-card {
   border: 1px solid var(--border); border-radius: 10px; background: var(--panel-2);
   padding: 0; overflow: hidden; align-self: stretch; max-width: 100%;

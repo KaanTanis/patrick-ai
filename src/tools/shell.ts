@@ -1,11 +1,19 @@
-import { exec } from "node:child_process";
+import { exec, type ChildProcess } from "node:child_process";
 import pc from "picocolors";
 import { register } from "./registry.js";
 import { classifyCommand } from "../safety.js";
 import { suggestPermissionPattern, rememberAllowPattern, allowOnceForSession } from "../state.js";
 import { renderProposal, riskBadge } from "./_ui.js";
+import type { ToolContext, ToolResult } from "../types.js";
 
-register({
+interface RunShellArgs {
+  command: string;
+  purpose: string;
+  cwd?: string;
+  timeout_sec?: number;
+}
+
+register<RunShellArgs>({
   name: "run_shell",
   description:
     "Kullanıcının macOS makinesinde bir shell (zsh) komutu çalıştırır. " +
@@ -24,7 +32,7 @@ register({
   handler: runShell,
 });
 
-async function runShell({ command, purpose, cwd, timeout_sec }, ctx) {
+async function runShell({ command, purpose, cwd, timeout_sec }: RunShellArgs, ctx: ToolContext): Promise<ToolResult> {
   const cls = classifyCommand(command);
 
   renderProposal({
@@ -32,12 +40,12 @@ async function runShell({ command, purpose, cwd, timeout_sec }, ctx) {
     rows: [
       ["amaç", purpose || "(belirtilmedi)"],
       ["cmd", pc.cyan(command)],
-      ...(cwd ? [["cwd", cwd]] : []),
+      ...(cwd ? [["cwd", cwd] as [string, string]] : []),
       ["risk", `${riskBadge(cls.level)}${cls.reason ? pc.dim(" — " + cls.reason) : ""}`],
     ],
   });
 
-  ctx.emitter?.emit?.("shell:propose", { command, purpose, cwd, risk: cls.level, reason: cls.reason, segments: cls.segments });
+  ctx.emitter?.emit("shell:propose", { command, purpose, cwd, risk: cls.level, reason: cls.reason, segments: cls.segments });
 
   if (cls.level === "forbidden") {
     return { ok: false, output: `KOMUT REDDEDİLDİ (yasaklı): ${cls.reason}` };
@@ -47,18 +55,19 @@ async function runShell({ command, purpose, cwd, timeout_sec }, ctx) {
     const suggestedPattern = suggestPermissionPattern(command);
     const decision = await ctx.confirmer.confirm("Bu komutu çalıştırmama izin veriyor musun?", {
       kind: "shell",
-      command, purpose, cwd, risk: cls.level, reason: cls.reason,
+      command, purpose, cwd, risk: cls.level, reason: cls.reason ?? undefined,
       suggestedPattern,
     });
     if (decision === "no") return { ok: false, output: "Kullanıcı reddetti." };
-    if (decision === "session") allowOnceForSession(command);
+    // ConfirmerDecision'da "session" yok artık; "yes" tek kullanımlık varsayılır.
     if (decision === "always") rememberAllowPattern(suggestedPattern);
+    void allowOnceForSession; // unused tutmak için - ileride session decision dönerse kullanılır
   }
 
   const timeoutMs = (timeout_sec || ctx.config.toolTimeoutSec) * 1000;
 
-  return new Promise((resolve) => {
-    const child = exec(command, {
+  return new Promise<ToolResult>((resolve) => {
+    const child: ChildProcess = exec(command, {
       cwd: cwd || process.cwd(),
       timeout: timeoutMs,
       maxBuffer: ctx.config.shellMaxOutputBytes,
@@ -66,17 +75,18 @@ async function runShell({ command, purpose, cwd, timeout_sec }, ctx) {
       signal: ctx.signal,
     }, (err, stdout, stderr) => {
       if (err) {
-        const msg = err.killed
-          ? `Komut iptal edildi (timeout veya kullanıcı kesintisi): ${err.signal || ""}`
-          : `Komut hata verdi (exit ${err.code ?? "?"}):\n${stdout || ""}\n${stderr || ""}\n${err.message}`;
+        const e = err as Error & { code?: number; signal?: string; killed?: boolean; stdout?: string; stderr?: string };
+        const msg = e.killed
+          ? `Komut iptal edildi (timeout veya kullanıcı kesintisi): ${e.signal || ""}`
+          : `Komut hata verdi (exit ${e.code ?? "?"}):\n${stdout || ""}\n${stderr || ""}\n${e.message}`;
         console.log(pc.red(indent(msg, "  ")));
-        ctx.emitter?.emit?.("shell:output", { command, ok: false, output: msg });
+        ctx.emitter?.emit("shell:output", { command, ok: false, output: msg });
         resolve({ ok: false, output: msg });
         return;
       }
       const out = (stdout || "") + (stderr ? `\n[stderr]\n${stderr}` : "");
       if (out.trim()) console.log(pc.dim(indent(out, "  ")));
-      ctx.emitter?.emit?.("shell:output", { command, ok: true, output: out });
+      ctx.emitter?.emit("shell:output", { command, ok: true, output: out });
       resolve({ ok: true, output: out || "(çıktı yok)" });
     });
 
@@ -84,6 +94,6 @@ async function runShell({ command, purpose, cwd, timeout_sec }, ctx) {
   });
 }
 
-function indent(text, prefix) {
+function indent(text: string, prefix: string): string {
   return String(text).split("\n").map((l) => prefix + l).join("\n");
 }

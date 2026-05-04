@@ -1,5 +1,5 @@
 // Tool yükleyicisi: yeni bir tool eklemek için sadece import satırı.
-// Ortak runtime için registry/dispatchTool burdan dışarı verilir.
+// Side-effect import: register() çağrıları her dosyada modül-yüklenince çalışır.
 
 import "./shell.js";
 import "./files.js";

@@ -1,8 +1,12 @@
 import pc from "picocolors";
 import { register } from "./registry.js";
 import { rememberNote, recallNotes } from "../state.js";
+import type { ToolResult } from "../types.js";
 
-register({
+interface RememberArgs { text: string; tags?: string[]; }
+interface RecallArgs { query?: string; limit?: number; }
+
+register<RememberArgs>({
   name: "memory_remember",
   description:
     "Kullanıcı hakkında ya da makinesi hakkında kalıcı bir not kaydeder. " +
@@ -17,7 +21,7 @@ register({
     },
     required: ["text"],
   },
-  async handler({ text, tags = [] }) {
+  async handler({ text, tags = [] }): Promise<ToolResult> {
     if (!text || !text.trim()) return { ok: false, output: "text boş olamaz" };
     const note = rememberNote(text, tags);
     console.log(pc.dim(`  ↳ memory: not eklendi (${note.id})`));
@@ -25,7 +29,7 @@ register({
   },
 });
 
-register({
+register<RecallArgs>({
   name: "memory_recall",
   description: "Hafızadan ilgili notları getirir. 'query' boşsa son notları döndürür.",
   parameters: {
@@ -35,7 +39,7 @@ register({
       limit: { type: "number", description: "Varsayılan 10" },
     },
   },
-  async handler({ query = "", limit = 10 }) {
+  async handler({ query = "", limit = 10 }): Promise<ToolResult> {
     const notes = recallNotes(query, limit);
     if (notes.length === 0) return { ok: true, output: "(eşleşen not yok)" };
     const lines = notes.map((n) => `[${n.id}] ${n.text}` + (n.tags?.length ? ` (#${n.tags.join(", #")})` : ""));

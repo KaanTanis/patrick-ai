@@ -1,6 +1,6 @@
 {
   "name": "patrick",
-  "version": "0.3.0",
+  "version": "1.0.0",
   "description": "Patrick — ChatGPT destekli, hafızalı, web UI'lı akıllı terminal asistanı",
   "type": "module",
   "bin": {
@@ -9,15 +9,26 @@
   },
   "scripts": {
     "start": "node bin/patrick.js",
-    "test": "node --test test/"
+    "build": "tsc && cp -R src/web/public dist/web/",
+    "dev": "tsx src/cli.ts",
+    "check": "tsc -p tsconfig.test.json --noEmit",
+    "test": "tsx --test test/*.test.ts",
+    "prepare": "tsc"
   },
+  "files": ["bin", "dist", "src", "tsconfig.json", "README.md"],
   "engines": {
     "node": ">=18"
   },
   "dependencies": {
-    "openai": "^6.35.0",
     "dotenv": "^16.4.5",
+    "openai": "^6.35.0",
     "picocolors": "^1.1.1",
     "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.39",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
   }
 }

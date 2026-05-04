@@ -75,9 +75,15 @@ patrick: 3000 ve 3001 portları boşaltıldı.
 ```bash
 git clone <repo-url> ~/ai-terminal      # ya da bu dizini koruyarak ilerle
 cd ~/ai-terminal
-npm install
+npm install                              # bağımlılıklar + otomatik build (prepare)
 cp .env.example .env                     # ardından OPENAI_API_KEY'i doldur
 ```
+
+> **Geliştirici notu:** Proje TypeScript ile yazılır. `npm install` `prepare`
+> hook'u aracılığıyla `tsc` çalıştırıp `dist/`'i üretir. Manuel build için
+> `npm run build`; geliştirme için `npm run dev` (tsx watcher); tip kontrolü
+> için `npm run check`. `bin/patrick.js` önce `dist/` arar, yoksa `tsx` ile
+> `src/cli.ts`'e fallback yapar.
 
 ### `patrick` komutunu PATH'e ekle
 
@@ -285,6 +291,14 @@ Tüm ayarlar `~/ai-terminal/.env` dosyasındadır. `cp .env.example .env` ile ba
 | `PATRICK_AUTO_APPROVE` | `false` | `true` ise tehlikeli komutlar için bile onay sormaz. **Üretim makinelerinde KESİNLİKLE kapalı tutun.** |
 | `PATRICK_WEB_PORT` | `7878` | Web UI portu. `0` = web UI başlatma. |
 | `PATRICK_WEB_OPEN` | `false` | `true` ise tarayıcı otomatik açılır. |
+| `PATRICK_LOG_LEVEL` | `warn` | `silent\|error\|warn\|info\|debug` |
+| `PATRICK_SESSION_KEEP_DAYS` | `30` | Bu süreden eski session dizinleri silinir |
+| `PATRICK_RESUME_ON_START` | `false` | `true` ise her açılışta önceki session yüklenir |
+| `PATRICK_RESUME_MAX_MESSAGES` | `30` | Resume'da saklanacak son N mesaj |
+| `PATRICK_PERSIST_CHUNKS` | `false` | Stream chunk'ları diske yazılsın mı |
+| `PATRICK_COMPACT_ENABLED` | `true` | Token eşiği aşılınca otomatik özet |
+| `PATRICK_COMPACT_THRESHOLD` | `12000` | Otomatik kompakt için token eşiği |
+| `PATRICK_COMPACT_KEEP_LAST` | `10` | Kompakt sonrası tutulacak son N mesaj |
 
 ---
 

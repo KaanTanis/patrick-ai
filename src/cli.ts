@@ -1,5 +1,5 @@
 import "dotenv/config";
-import readline from "node:readline";
+import readline, { type Interface as Readline } from "node:readline";
 import path from "node:path";
 import fs from "node:fs";
 import os from "node:os";
@@ -13,7 +13,13 @@ import { setLogLevel, createLogger } from "./logger.js";
 import { Agent } from "./agent.js";
 import { buildSystemPrompt } from "./prompt.js";
 import { createTerminalConfirmer, createDenyConfirmer, createCompoundConfirmer } from "./confirmer.js";
-import { ensureStateDir, newSessionLogger, listPermissions, clearAllowPatterns, loadMemory, forgetNote } from "./state.js";
+import {
+  ensureStateDir, newSessionLogger,
+  listPermissions, clearAllowPatterns, loadMemory, forgetNote,
+  pruneOldSessions, findLatestSession, loadMessages, listSessions, loadMeta,
+  SESSIONS_BASE_DIR,
+} from "./state.js";
+import type { Config, Confirmer, SessionLogger } from "./types.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PATRICK_HOME = path.join(__dirname, "..");
@@ -24,27 +30,35 @@ const repoEnv = path.join(PATRICK_HOME, ".env");
 if (fs.existsSync(repoEnv)) {
   for (const line of fs.readFileSync(repoEnv, "utf8").split("\n")) {
     const m = line.match(/^\s*([\w.-]+)\s*=\s*(.*?)\s*$/);
-    if (m && !process.env[m[1]]) process.env[m[1]] = m[2].replace(/^["']|["']$/g, "");
+    if (m && !process.env[m[1]!]) process.env[m[1]!] = (m[2] ?? "").replace(/^["']|["']$/g, "");
   }
 }
 
-// ---------- argv ----------
-function parseArgs(argv) {
-  const out = { print: false, help: false, version: false, noWeb: false, prompt: "" };
-  const tokens = [];
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i];
+interface Args {
+  print: boolean;
+  help: boolean;
+  version: boolean;
+  noWeb: boolean;
+  resume: boolean;
+  prompt: string;
+}
+
+function parseArgs(argv: string[]): Args {
+  const out: Args = { print: false, help: false, version: false, noWeb: false, resume: false, prompt: "" };
+  const tokens: string[] = [];
+  for (const a of argv) {
     if (a === "-p" || a === "--print") out.print = true;
     else if (a === "-h" || a === "--help") out.help = true;
     else if (a === "-v" || a === "--version") out.version = true;
     else if (a === "--no-web") out.noWeb = true;
+    else if (a === "--resume") out.resume = true;
     else tokens.push(a);
   }
   out.prompt = tokens.join(" ").trim();
   return out;
 }
 
-function printUsage(cfg) {
+function printUsage(cfg?: Config): void {
   console.log(`
 ${pc.bold("patrick")} — ChatGPT destekli, hafızalı, web UI'lı terminal asistanı
 
@@ -52,6 +66,7 @@ ${pc.bold("Kullanım:")}
   patrick                          REPL aç (web UI da otomatik başlar)
   patrick "soru / komut"           Soruyu çalıştır, sonra REPL'de kal
   patrick -p "soru"                Tek seferlik (script): cevap ver, çık
+  patrick --resume                 Son oturumun mesajlarıyla devam et
   patrick --no-web                 Web UI'ı başlatma
   patrick --help / --version
 
@@ -67,7 +82,10 @@ ${pc.bold("REPL slash komutları:")}
   /perms clear                     'Her zaman izinli' kuralları sil
   /memory                          Hafızadaki notları göster
   /forget <id>                     Bir notu hafızadan sil
-  /usage                           Bu oturumun token/cost özeti
+  /usage                           Bu oturumun token özeti
+  /sessions                        Diskte saklı son oturumları listele
+  /resume [<id>]                   Bir oturumu yükle (id verilmezse son)
+  /compact                         Mesaj geçmişini şimdi özetle (manuel)
 
 ${pc.bold("Çevre değişkenleri:")}  (${pc.dim(".env")} ya da shell)
   OPENAI_API_KEY                   ${cfg?.apiKey ? pc.green("ayarlı") : pc.red("ayarsız")}
@@ -76,10 +94,12 @@ ${pc.bold("Çevre değişkenleri:")}  (${pc.dim(".env")} ya da shell)
   PATRICK_WEB_PORT                 ${cfg?.webPort ?? 7878}  (0 = kapalı)
   PATRICK_WEB_OPEN                 ${cfg?.webOpenBrowser ?? false}
   PATRICK_LOG_LEVEL                ${cfg?.logLevel ?? "warn"}  (silent|error|warn|info|debug)
+  PATRICK_COMPACT_THRESHOLD        ${cfg?.compactThresholdTokens ?? 12000}  (token)
+  PATRICK_COMPACT_KEEP_LAST        ${cfg?.compactKeepLastMessages ?? 10}    (mesaj)
 `);
 }
 
-function printBanner({ model, autoApprove, webUrl }) {
+function printBanner({ model, autoApprove, webUrl }: { model: string; autoApprove: boolean; webUrl?: string }): void {
   console.log();
   console.log(pc.bold(pc.cyan("  patrick")) + pc.dim("  ChatGPT destekli akıllı terminal"));
   console.log(
@@ -96,30 +116,59 @@ function printBanner({ model, autoApprove, webUrl }) {
   console.log();
 }
 
-function prettyCwd() {
+function prettyCwd(): string {
   const cwd = process.cwd();
   const home = os.homedir();
   return cwd.startsWith(home) ? "~" + cwd.slice(home.length) : cwd;
 }
 
-function loadHistory(maxLines) {
+function loadHistory(maxLines: number): string[] {
   try { return fs.readFileSync(HISTORY_FILE, "utf8").split("\n").filter(Boolean).slice(-maxLines); }
   catch { return []; }
 }
-function saveHistoryLine(line) {
+function saveHistoryLine(line: string): void {
   if (!line || line.startsWith("/")) return;
-  try { fs.appendFileSync(HISTORY_FILE, line + "\n"); } catch {}
+  try { fs.appendFileSync(HISTORY_FILE, line + "\n"); } catch { /* ignore */ }
 }
 
-// ---------- main ----------
-async function main() {
+interface MakeAgentOpts {
+  cfg: Config;
+  bus: EventEmitter;
+  confirmer: Confirmer;
+  prevAutoApprove?: boolean | null;
+}
+
+function makeAgent({ cfg, bus, confirmer, prevAutoApprove = null }: MakeAgentOpts): Agent {
+  const auto = prevAutoApprove !== null ? prevAutoApprove : cfg.autoApprove;
+  const agentCfg: Config = {
+    ...cfg,
+    autoApprove: auto,
+    model: process.env.PATRICK_MODEL || cfg.model,
+  };
+  const a = new Agent({ config: agentCfg, confirmer, emitter: bus });
+  a.setSystemPrompt(buildSystemPrompt(cfg));
+  return a;
+}
+
+interface ReplDeps {
+  rl: Readline;
+  cfg: Config;
+  bus: EventEmitter;
+  confirmer: Confirmer;
+  sessionLogger: SessionLogger;
+  webServer: { url: string; close: () => Promise<void> } | null;
+  getAgent: () => Agent;
+  setAgent: (a: Agent) => void;
+}
+
+async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   const cfg = loadConfig();
   setLogLevel(cfg.logLevel);
 
   if (args.help) { printUsage(cfg); return; }
   if (args.version) {
-    const pkg = JSON.parse(fs.readFileSync(path.join(PATRICK_HOME, "package.json"), "utf8"));
+    const pkg = JSON.parse(fs.readFileSync(path.join(PATRICK_HOME, "package.json"), "utf8")) as { version: string };
     console.log(`patrick v${pkg.version}`);
     return;
   }
@@ -132,11 +181,44 @@ async function main() {
   }
 
   ensureStateDir();
-  const sessionLogger = newSessionLogger();
+
+  try {
+    const deleted = pruneOldSessions(SESSIONS_BASE_DIR, cfg.sessionKeepDays, log);
+    if (deleted > 0) log.info(`${deleted} eski session silindi (${cfg.sessionKeepDays} gün+)`);
+  } catch (err) {
+    log.warn("session cleanup hatası:", (err as Error).message);
+  }
+
+  const sessionLogger = newSessionLogger({
+    model: cfg.model,
+    persistChunks: cfg.persistChunks,
+    log,
+  });
   const bus = new EventEmitter();
 
-  // İnteraktif modda parent rl'i ŞİMDİ yarat ki confirmer onu paylaşsın.
-  let rl = null;
+  const PERSISTABLE_EVENTS = [
+    "tool:start", "tool:end",
+    "shell:propose", "shell:output",
+    "write:propose", "kill_port:propose",
+    "assistant:start", "assistant:chunk", "assistant:done", "assistant:text",
+    "user:text",
+    "agent:usage", "agent:compact",
+  ];
+  for (const t of PERSISTABLE_EVENTS) {
+    bus.on(t, (payload: unknown) => sessionLogger.store.appendEvent(t, payload));
+  }
+
+  // Streaming render: stdout chunk-by-chunk
+  bus.on("assistant:start", () => { process.stdout.write("\n" + pc.bold(pc.magenta("patrick: "))); });
+  bus.on("assistant:chunk", (p: { delta: string }) => { process.stdout.write(p.delta); });
+  bus.on("assistant:done", () => { process.stdout.write("\n"); });
+
+  // Compact bilgisi
+  bus.on("agent:compact", (p: { count: number; estTokens: number }) => {
+    console.log(pc.dim(`\n  (auto-compact: ${p.count} mesaj özetlendi, ~${p.estTokens} token)`));
+  });
+
+  let rl: Readline | null = null;
   if (!args.print) {
     rl = readline.createInterface({
       input: process.stdin,
@@ -148,8 +230,9 @@ async function main() {
     });
   }
 
-  // ---- web sunucusu ----
-  let webServer = null;
+  // Web sunucu
+  type WebHandle = Awaited<ReturnType<typeof import("./web/server.js").startWebServer>>;
+  let webServer: WebHandle | null = null;
   const wantWeb = !args.noWeb && !args.print && cfg.webEnabled;
   if (wantWeb && cfg.webPort > 0) {
     try {
@@ -159,23 +242,41 @@ async function main() {
         port: cfg.webPort,
         getAgent: () => agent,
         bus,
+        sessionStore: sessionLogger.store,
       });
     } catch (err) {
-      log.warn(`web UI başlatılamadı: ${err.message}, sadece terminal modu`);
+      log.warn(`web UI başlatılamadı: ${(err as Error).message}, sadece terminal modu`);
     }
   }
 
-  // ---- confirmer seçimi ----
-  // Print mode → asla onay sormaz, otomatik reddeder.
-  // İnteraktif → terminal + (varsa) web compound.
-  const confirmer = args.print
+  const confirmer: Confirmer = args.print
     ? createDenyConfirmer({ log })
     : createCompoundConfirmer({
         terminal: createTerminalConfirmer(rl),
         web: webServer,
       });
 
-  let agent = makeAgent({ cfg, bus, confirmer, sessionLogger });
+  let agent: Agent = makeAgent({ cfg, bus, confirmer });
+
+  // --resume / PATRICK_RESUME_ON_START
+  if (args.resume || cfg.resumeOnStart) {
+    void findLatestSession;
+    const all = listSessions(SESSIONS_BASE_DIR);
+    const previous = all.find((id) => id !== sessionLogger.id);
+    if (previous) {
+      const old = loadMessages(SESSIONS_BASE_DIR, previous);
+      if (old) {
+        const restored = agent.loadSnapshot(old);
+        const meta = loadMeta(SESSIONS_BASE_DIR, previous);
+        log.info(`session resume: ${previous} (${restored} mesaj, ${meta?.messageCount ?? "?"} orijinal)`);
+        console.log(pc.dim(`  (önceki oturum yüklendi: ${previous}, ${restored} mesaj)`));
+      } else {
+        console.log(pc.yellow(`  (resume: önceki oturumda messages.json yok, devam edilemiyor)`));
+      }
+    } else {
+      console.log(pc.dim("  (resume: önceki oturum yok)"));
+    }
+  }
 
   // ---- print modu ----
   if (args.print) {
@@ -184,6 +285,8 @@ async function main() {
       process.exit(2);
     }
     await agent.send(args.prompt);
+    try { sessionLogger.saveMessages(agent.messages); } catch { /* ignore */ }
+    try { await sessionLogger.close(); } catch { /* ignore */ }
     return;
   }
 
@@ -191,37 +294,32 @@ async function main() {
   printBanner({ model: agent.model, autoApprove: agent.autoApprove, webUrl: webServer?.url });
 
   if (webServer && cfg.webOpenBrowser) {
-    exec(`open "${webServer.url}"`, () => {});
+    exec(`open "${webServer.url}"`, () => { /* fire and forget */ });
   }
 
   if (args.prompt) {
     console.log(pc.bold(pc.green("you ❯ ")) + args.prompt);
     saveHistoryLine(args.prompt);
-    bus.emit("user:text", { text: args.prompt });
     try { await agent.send(args.prompt); }
-    catch (err) { console.error(pc.red("\nHata: " + (err?.message || err))); }
+    catch (err) { console.error(pc.red("\nHata: " + ((err as Error)?.message || err))); }
   }
 
   await runRepl({
-    rl, cfg, bus, confirmer, sessionLogger, webServer,
+    rl: rl!,
+    cfg,
+    bus,
+    confirmer,
+    sessionLogger,
+    webServer,
     getAgent: () => agent,
-    setAgent: (a) => (agent = a),
+    setAgent: (a: Agent) => { agent = a; },
   });
 }
 
-function makeAgent({ cfg, bus, confirmer, sessionLogger, prevAutoApprove = null }) {
-  const agentCfg = {
-    ...cfg,
-    autoApprove: prevAutoApprove !== null ? prevAutoApprove : cfg.autoApprove,
-    model: process.env.PATRICK_MODEL || cfg.model,
-  };
-  const a = new Agent({ config: agentCfg, confirmer, emitter: bus, sessionLogger });
-  a.setSystemPrompt(buildSystemPrompt(cfg));
-  return a;
-}
+async function runRepl(deps: ReplDeps): Promise<void> {
+  const { rl, cfg, bus, confirmer, sessionLogger, webServer, getAgent, setAgent } = deps;
 
-async function runRepl({ rl, cfg, bus, confirmer, sessionLogger, webServer, getAgent, setAgent }) {
-  const refreshPrompt = () => {
+  const refreshPrompt = (): void => {
     rl.setPrompt(`${pc.dim(`(${prettyCwd()})`)} ${pc.bold(pc.green("you ❯"))} `);
     rl.prompt();
   };
@@ -229,9 +327,8 @@ async function runRepl({ rl, cfg, bus, confirmer, sessionLogger, webServer, getA
   let lastSigint = 0;
   rl.on("SIGINT", () => {
     const now = Date.now();
-    // Aktif iş varsa onu iptal et
     const a = getAgent();
-    if (a._abort) {
+    if (a.isBusy) {
       console.log(pc.yellow("\n  (devam eden iş iptal edildi)"));
       a.cancel();
       return;
@@ -239,12 +336,13 @@ async function runRepl({ rl, cfg, bus, confirmer, sessionLogger, webServer, getA
     if (rl.line && rl.line.length > 0) {
       readline.cursorTo(process.stdout, 0);
       readline.clearLine(process.stdout, 0);
-      rl.line = ""; rl.cursor = 0;
+      (rl as unknown as { line: string; cursor: number }).line = "";
+      (rl as unknown as { line: string; cursor: number }).cursor = 0;
       refreshPrompt();
       lastSigint = 0;
       return;
     }
-    if (now - lastSigint < 1500) return rl.close();
+    if (now - lastSigint < 1500) { rl.close(); return; }
     lastSigint = now;
     process.stdout.write(pc.dim("\n  (çıkmak için bir kez daha Ctrl+C, ya da /exit)\n"));
     refreshPrompt();
@@ -252,20 +350,19 @@ async function runRepl({ rl, cfg, bus, confirmer, sessionLogger, webServer, getA
 
   refreshPrompt();
 
-  rl.on("line", async (raw) => {
+  rl.on("line", async (raw: string) => {
     const line = raw.trim();
-    if (!line) return refreshPrompt();
+    if (!line) { refreshPrompt(); return; }
 
-    const handled = await handleSlashCommand(line, { rl, cfg, bus, confirmer, sessionLogger, webServer, getAgent, setAgent });
-    if (handled) return refreshPrompt();
+    const handled = await handleSlashCommand(line, deps);
+    if (handled) { refreshPrompt(); return; }
 
     saveHistoryLine(line);
-    bus.emit("user:text", { text: line });
 
     try {
       await getAgent().send(line);
     } catch (err) {
-      const m = err?.message || String(err);
+      const m = (err as Error)?.message || String(err);
       console.error(pc.red("\nHata: " + m));
       if (/tool_call_ids did not have response messages/.test(m)) {
         const added = getAgent().repair();
@@ -275,30 +372,33 @@ async function runRepl({ rl, cfg, bus, confirmer, sessionLogger, webServer, getA
     refreshPrompt();
   });
 
-  await new Promise((resolve) => {
+  await new Promise<void>((resolve) => {
     rl.on("close", async () => {
       const a = getAgent();
+      try { sessionLogger.saveMessages(a.messages); } catch { /* ignore */ }
+      try { await sessionLogger.close(); } catch { /* ignore */ }
+
       if (a.usage.totalTokens > 0) {
         console.log(pc.dim(`\n  oturum kullanımı: ${a.usage.promptTokens} prompt + ${a.usage.completionTokens} completion = ${a.usage.totalTokens} token`));
       }
       console.log(pc.dim("görüşürüz 👋"));
-      if (webServer) { try { await webServer.close(); } catch {} }
+      if (webServer) { try { await webServer.close(); } catch { /* ignore */ } }
       resolve();
       process.exit(0);
     });
   });
+
+  // unused var temizliği için
+  void cfg; void bus; void confirmer; void setAgent;
 }
 
-/**
- * Slash komutları handler. Slash ise true döndürür.
- */
-async function handleSlashCommand(line, deps) {
+async function handleSlashCommand(line: string, deps: ReplDeps): Promise<boolean> {
   const { rl, cfg, bus, confirmer, sessionLogger, webServer, getAgent, setAgent } = deps;
 
   if (line === "/exit" || line === "/quit") { rl.close(); return true; }
   if (line === "/help") { printUsage(cfg); return true; }
   if (line === "/clear") {
-    setAgent(makeAgent({ cfg, bus, confirmer, sessionLogger, prevAutoApprove: getAgent().autoApprove }));
+    setAgent(makeAgent({ cfg, bus, confirmer, prevAutoApprove: getAgent().autoApprove }));
     console.log(pc.dim("  (konuşma geçmişi temizlendi)"));
     return true;
   }
@@ -310,7 +410,7 @@ async function handleSlashCommand(line, deps) {
   if (line.startsWith("/cwd ")) {
     const target = line.slice(5).trim().replace(/^~(?=\/|$)/, os.homedir());
     try { process.chdir(target); console.log(pc.dim("  cwd → " + prettyCwd())); }
-    catch (e) { console.log(pc.red("  cwd değişmedi: " + e.message)); }
+    catch (e) { console.log(pc.red("  cwd değişmedi: " + (e as Error).message)); }
     return true;
   }
   if (line.startsWith("/auto ")) {
@@ -324,13 +424,13 @@ async function handleSlashCommand(line, deps) {
     const m = line.slice(7).trim();
     if (!m) { console.log(pc.red("  Kullanım: /model <ad>")); return true; }
     process.env.PATRICK_MODEL = m;
-    setAgent(makeAgent({ cfg, bus, confirmer, sessionLogger, prevAutoApprove: getAgent().autoApprove }));
+    setAgent(makeAgent({ cfg, bus, confirmer, prevAutoApprove: getAgent().autoApprove }));
     console.log(pc.dim(`  model: ${m} (geçmiş sıfırlandı)`));
     return true;
   }
   if (line === "/web") {
     if (!webServer) console.log(pc.yellow("  Web UI çalışmıyor. patrick'i --no-web olmadan başlat."));
-    else { console.log(pc.dim("  web: ") + pc.cyan(webServer.url)); exec(`open "${webServer.url}"`, () => {}); }
+    else { console.log(pc.dim("  web: ") + pc.cyan(webServer.url)); exec(`open "${webServer.url}"`, () => { /* */ }); }
     return true;
   }
   if (line === "/perms") {
@@ -366,10 +466,45 @@ async function handleSlashCommand(line, deps) {
     }
     return true;
   }
+  if (line === "/sessions") {
+    const ids = listSessions(SESSIONS_BASE_DIR).slice(0, 10);
+    if (ids.length === 0) console.log(pc.dim("  (kayıtlı session yok)"));
+    else for (const id of ids) {
+      const meta = loadMeta(SESSIONS_BASE_DIR, id) || {} as { messageCount?: number; model?: string };
+      const live = id === sessionLogger.id ? pc.green(" (şimdiki)") : "";
+      console.log(`  ${pc.cyan(id)}${live}  msg=${meta.messageCount ?? "?"} model=${meta.model ?? "?"}`);
+    }
+    return true;
+  }
+  if (line === "/resume" || line.startsWith("/resume ")) {
+    const wanted = line.length > 7 ? line.slice(8).trim() : "";
+    const all = listSessions(SESSIONS_BASE_DIR);
+    let target: string | undefined;
+    if (wanted) {
+      target = all.find((id) => id === wanted || id.startsWith(wanted));
+    } else {
+      target = all.find((id) => id !== sessionLogger.id);
+    }
+    if (!target) { console.log(pc.red("  o id'ye uyan session bulunamadı")); return true; }
+    const old = loadMessages(SESSIONS_BASE_DIR, target);
+    if (!old) { console.log(pc.red("  o session'da messages.json yok")); return true; }
+    const restored = getAgent().loadSnapshot(old);
+    console.log(pc.dim(`  (yüklendi: ${target}, ${restored} mesaj)`));
+    return true;
+  }
+  if (line === "/compact") {
+    const a = getAgent();
+    const before = a.estimateTokens();
+    const summarized = await a._maybeCompactMessages();
+    const after = a.estimateTokens();
+    if (summarized > 0) console.log(pc.dim(`  (özetlendi: ${summarized} mesaj, ~${before} → ~${after} token)`));
+    else console.log(pc.dim(`  (eşik aşılmadı, ~${before} token)`));
+    return true;
+  }
   return false;
 }
 
-main().catch((err) => {
-  console.error(pc.red("Ölümcül hata: " + (err?.message || err)));
+main().catch((err: unknown) => {
+  console.error(pc.red("Ölümcül hata: " + ((err as Error)?.message || err)));
   process.exit(1);
 });

@@ -3,17 +3,22 @@ import { promisify } from "node:util";
 import pc from "picocolors";
 import { register } from "./registry.js";
 import { renderProposal } from "./_ui.js";
+import type { ToolContext, ToolResult, KilledProcess } from "../types.js";
 
 const execAsync = promisify(exec);
 
-register({
+interface ListPortsArgs { ports?: number[]; }
+interface FindProcessArgs { query: string; }
+interface KillPortArgs { ports: number[]; force?: boolean; }
+
+register<ListPortsArgs>({
   name: "list_ports",
   description: "Sistemde dinlenmekte olan TCP portlarını listeler. 'ports' verilirse sadece o portları kontrol eder.",
   parameters: {
     type: "object",
     properties: { ports: { type: "array", items: { type: "integer" } } },
   },
-  async handler({ ports }) {
+  async handler({ ports }): Promise<ToolResult> {
     const filter = (ports && ports.length)
       ? ports.map((p) => `-i :${Number(p)}`).join(" ")
       : "-iTCP -sTCP:LISTEN -P -n";
@@ -21,13 +26,14 @@ register({
       const { stdout } = await execAsync(`lsof ${filter}`, { timeout: 5000 });
       return { ok: true, output: stdout || "(dinleyen port yok)" };
     } catch (err) {
-      if (err.code === 1) return { ok: true, output: "(eşleşen dinleyen port yok)" };
-      return { ok: false, output: err.message };
+      const e = err as Error & { code?: number };
+      if (e.code === 1) return { ok: true, output: "(eşleşen dinleyen port yok)" };
+      return { ok: false, output: e.message };
     }
   },
 });
 
-register({
+register<FindProcessArgs>({
   name: "find_process",
   description: "ps aux çıktısında bir desene uyan süreçleri bulur.",
   parameters: {
@@ -35,20 +41,21 @@ register({
     properties: { query: { type: "string", description: "Aranacak metin (komut adının bir parçası)" } },
     required: ["query"],
   },
-  async handler({ query }) {
+  async handler({ query }): Promise<ToolResult> {
     if (!query) return { ok: false, output: "query boş olamaz" };
     const safe = String(query).replace(/'/g, "'\\''");
     try {
       const { stdout } = await execAsync(`ps aux | grep -i '${safe}' | grep -v grep`);
       return { ok: true, output: stdout || "(eşleşen süreç yok)" };
     } catch (err) {
-      if (err.code === 1) return { ok: true, output: "(eşleşen süreç yok)" };
-      return { ok: false, output: err.message };
+      const e = err as Error & { code?: number };
+      if (e.code === 1) return { ok: true, output: "(eşleşen süreç yok)" };
+      return { ok: false, output: e.message };
     }
   },
 });
 
-register({
+register<KillPortArgs>({
   name: "kill_port",
   description: "Bir veya birden çok TCP portunu dinleyen süreçleri bulur ve sonlandırır. Onay sorulur.",
   parameters: {
@@ -59,26 +66,36 @@ register({
     },
     required: ["ports"],
   },
-  async handler({ ports, force }, ctx) {
+  async handler({ ports, force }, ctx: ToolContext): Promise<ToolResult> {
     if (!Array.isArray(ports) || ports.length === 0) {
       return { ok: false, output: "ports parametresi gerekli" };
     }
 
-    let info;
+    let info: string;
     try {
       const args = ports.map((p) => `-i :${Number(p)}`).join(" ");
       const { stdout } = await execAsync(`lsof -P -n ${args}`, { timeout: 5000 });
       info = stdout;
     } catch (err) {
-      if (err.code === 1) return { ok: true, output: "Belirtilen portları dinleyen süreç yok." };
-      return { ok: false, output: `lsof hatası: ${err.message}` };
+      const e = err as Error & { code?: number };
+      if (e.code === 1) return { ok: true, output: "Belirtilen portları dinleyen süreç yok." };
+      return { ok: false, output: `lsof hatası: ${e.message}` };
     }
 
     const lines = info.trim().split("\n").slice(1);
-    const procs = lines.map((l) => {
-      const cols = l.trim().split(/\s+/);
-      return { command: cols[0], pid: parseInt(cols[1], 10), user: cols[2], port: cols[8] };
-    }).filter((p) => Number.isFinite(p.pid));
+    const procs: KilledProcess[] = lines
+      .map((l): KilledProcess | null => {
+        const cols = l.trim().split(/\s+/);
+        const pid = parseInt(cols[1] ?? "", 10);
+        if (!Number.isFinite(pid)) return null;
+        return {
+          command: cols[0] ?? "",
+          pid,
+          user: cols[2] ?? "",
+          port: cols[8] ?? "",
+        };
+      })
+      .filter((p): p is KilledProcess => p !== null);
 
     if (procs.length === 0) {
       return { ok: true, output: "Belirtilen portları dinleyen süreç yok." };
@@ -94,7 +111,7 @@ register({
         ["hedef", summary],
       ],
     });
-    ctx.emitter?.emit?.("kill_port:propose", { ports, force, procs });
+    ctx.emitter?.emit("kill_port:propose", { ports, force, procs });
 
     if (!ctx.autoApprove) {
       const decision = await ctx.confirmer.confirm(
@@ -105,13 +122,13 @@ register({
     }
 
     const sig = force ? "-9" : "-15";
-    const results = [];
+    const results: string[] = [];
     for (const p of procs) {
       try {
         await execAsync(`kill ${sig} ${p.pid}`, { timeout: 3000 });
         results.push(`✓ ${p.command} (PID ${p.pid}) → kill ${sig}`);
       } catch (err) {
-        results.push(`✗ ${p.command} (PID ${p.pid}) → ${err.message}`);
+        results.push(`✗ ${p.command} (PID ${p.pid}) → ${(err as Error).message}`);
       }
     }
     return { ok: true, output: results.join("\n") };

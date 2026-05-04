@@ -1,10 +1,10 @@
 // Tüm runtime ayarlarının ve sabitlerin tek noktası.
 // Yeni bir ayar eklerken: (1) burada DEFAULTS'a ekle, (2) loadConfig'te env'den oku.
-//
-// Tasarım kuralı: kod içinde process.env okuma — sadece bu dosyada.
+// Kod içinde process.env okuma — sadece bu dosyada.
 
 import path from "node:path";
 import os from "node:os";
+import type { Config, LogLevel } from "./types.js";
 
 export const PATRICK_DIR = path.join(os.homedir(), ".patrick");
 export const HISTORY_FILE = path.join(os.homedir(), ".patrick-history");
@@ -26,26 +26,38 @@ const DEFAULTS = {
   historySize: 500,
   memoryInjectLimit: 30,
 
-  logLevel: "warn",   // silent | error | warn | info | debug
+  sessionKeepDays: 30,
+  resumeOnStart: false,
+  resumeMaxMessages: 30,
+  persistChunks: false,
+
+  // Summarization (Faz 3)
+  compactEnabled: true,
+  compactThresholdTokens: 12_000,    // gpt-4o için makul; modeli büyük/küçük ise ayarla
+  compactKeepLastMessages: 10,        // kompakt sonrası saklanan tail
+
+  logLevel: "warn" as LogLevel,
 };
 
-function bool(v, fallback) {
+function bool(v: string | undefined, fallback: boolean): boolean {
   if (v == null) return fallback;
   return /^(true|1|yes|on)$/i.test(String(v));
 }
-function num(v, fallback) {
+function num(v: string | undefined, fallback: number): number {
   if (v == null || v === "") return fallback;
   const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
 }
 
-/**
- * Çevre değişkenlerini ve isteğe bağlı override'ları birleştirip donmuş bir
- * config nesnesi döndürür. .env'in dotenv tarafından yüklenmiş olduğunu varsayar.
- */
-export function loadConfig(overrides = {}) {
+const VALID_LEVELS: ReadonlySet<LogLevel> = new Set(["silent", "error", "warn", "info", "debug"]);
+function level(v: string | undefined, fallback: LogLevel): LogLevel {
+  const x = (v || "").toLowerCase() as LogLevel;
+  return VALID_LEVELS.has(x) ? x : fallback;
+}
+
+export function loadConfig(overrides: Partial<Config> = {}): Readonly<Config> {
   const env = process.env;
-  const cfg = {
+  const cfg: Config = {
     apiKey: env.OPENAI_API_KEY || "",
     model: env.PATRICK_MODEL || DEFAULTS.model,
     autoApprove: bool(env.PATRICK_AUTO_APPROVE, DEFAULTS.autoApprove),
@@ -63,7 +75,16 @@ export function loadConfig(overrides = {}) {
     historySize: num(env.PATRICK_HISTORY_SIZE, DEFAULTS.historySize),
     memoryInjectLimit: num(env.PATRICK_MEMORY_LIMIT, DEFAULTS.memoryInjectLimit),
 
-    logLevel: (env.PATRICK_LOG_LEVEL || DEFAULTS.logLevel).toLowerCase(),
+    sessionKeepDays: num(env.PATRICK_SESSION_KEEP_DAYS, DEFAULTS.sessionKeepDays),
+    resumeOnStart: bool(env.PATRICK_RESUME_ON_START, DEFAULTS.resumeOnStart),
+    resumeMaxMessages: num(env.PATRICK_RESUME_MAX_MESSAGES, DEFAULTS.resumeMaxMessages),
+    persistChunks: bool(env.PATRICK_PERSIST_CHUNKS, DEFAULTS.persistChunks),
+
+    compactEnabled: bool(env.PATRICK_COMPACT_ENABLED, DEFAULTS.compactEnabled),
+    compactThresholdTokens: num(env.PATRICK_COMPACT_THRESHOLD, DEFAULTS.compactThresholdTokens),
+    compactKeepLastMessages: num(env.PATRICK_COMPACT_KEEP_LAST, DEFAULTS.compactKeepLastMessages),
+
+    logLevel: level(env.PATRICK_LOG_LEVEL, DEFAULTS.logLevel),
 
     paths: {
       patrickDir: PATRICK_DIR,

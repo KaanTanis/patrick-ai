@@ -1,8 +1,10 @@
 import os from "node:os";
 import { loadMemory } from "./state.js";
+import type { Config } from "./types.js";
 
-export function buildSystemPrompt(config = {}) {
+export function buildSystemPrompt(config: Partial<Config> = {}): string {
   const memLimit = config.memoryInjectLimit || 30;
+
   const ctx = {
     user: os.userInfo().username,
     host: os.hostname(),

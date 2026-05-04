@@ -1,18 +1,13 @@
-// Güvenlik politikası: hangi komutlar serbest, hangileri onay ister, hangileri kesinlikle yasak.
-// Politika basit ve şeffaf tutulmuştur; her zaman kullanıcı görebilir/değiştirebilir.
+// Güvenlik politikası: hangi komutlar serbest, hangileri onay ister, hangileri yasak.
 //
 // KRİTİK TASARIM: Bir komut string'i çoklu segmenti içerebilir:
 //   "ls && rm -rf /tmp"   →  [ "ls", "rm -rf /tmp" ]
-//   "echo hi | sh"        →  [ "echo hi", "sh" ]
-//   "x=$(curl ...)"       →  [ "x=$(curl ...)", "curl ..." ]
 // İlk segmentin SAFE olması yeterli değildir; en yüksek risk seviyesi kazanır.
-// `splitShellCommand` shell separator'larını parse edip segmentleri çıkarır.
 
 import { isAlwaysAllowed, isAlwaysDenied } from "./state.js";
+import type { Classification, RiskLevel, SegmentClassification } from "./types.js";
 
-// Onaysız çalışan, "salt-okunur / zararsız" komut prefiksleri.
-// Eşleşme: segmentin ilk tokenı bu listede olmalı (veya `git <alt-komut>` gibi 2 token).
-const SAFE_PREFIXES = [
+const SAFE_PREFIXES: readonly string[] = [
   "ls", "pwd", "cd", "echo", "cat", "head", "tail", "wc", "stat",
   "which", "whoami", "hostname", "uname", "uptime", "date",
   "ps", "top", "htop", "df", "du", "free", "lsof",
@@ -25,8 +20,7 @@ const SAFE_PREFIXES = [
   "curl", "ping", "dig", "nslookup", "traceroute",
 ];
 
-// Onay isteyen riskli kalıplar (regex).
-const APPROVAL_PATTERNS = [
+const APPROVAL_PATTERNS: readonly RegExp[] = [
   /\brm\b/,
   /\bmv\b/,
   /\bcp\b\s+-r/,
@@ -41,18 +35,17 @@ const APPROVAL_PATTERNS = [
   /\bdocker\b/, /\bkubectl\b/,
   /\bmkdir\b/, /\btouch\b/, /\btee\b/,
   /\bopen\b/,
-  /\b(sh|bash|zsh|fish)\b/,           // herhangi bir shell çağrısı (curl|sh dahil)
-  /\beval\b/,                          // eval — daima onay
-  /\bexport\b/,                        // env değiştirme — daima onay
-  /\bsource\b/, /^\.\s/,               // source / dot-source
+  /\b(sh|bash|zsh|fish)\b/,
+  /\beval\b/,
+  /\bexport\b/,
+  /\bsource\b/, /^\.\s/,
 ];
 
-// Hiçbir koşulda çalıştırılmayacak felaket kalıpları.
-const FORBIDDEN_PATTERNS = [
-  /\brm\s+-rf?\s+\/(?!\w)/,            // rm -rf / ya da rm -rf /<boşluk>
+const FORBIDDEN_PATTERNS: readonly RegExp[] = [
+  /\brm\s+-rf?\s+\/(?!\w)/,
   /\brm\s+-rf?\s+~\s*$/,
   /\brm\s+-rf?\s+\$HOME\s*$/,
-  /:\(\)\s*\{.*\|\s*:.*&\s*\}\s*;:/,    // fork bomb
+  /:\(\)\s*\{.*\|\s*:.*&\s*\}\s*;:/,
   /\bmkfs(\.\w+)?\b/,
   /\bdd\s+if=.*of=\/dev\/[sh]d/,
   />\s*\/dev\/[sh]d/,
@@ -62,18 +55,12 @@ const FORBIDDEN_PATTERNS = [
 /**
  * Bir komut string'ini shell separator'larıyla segmentlerine böler.
  * Quote-aware: tek tırnak, çift tırnak ve escape karakterlerini gözetir.
- * `$( … )` ve `` ` … ` `` içerikleri ayrı segment olarak çıkar.
- *
- * @param {string} cmd
- * @returns {string[]} segmentler (boşlukları trimlenmiş, boşlar atılmış)
  */
-export function splitShellCommand(cmd) {
-  const segs = [];
+export function splitShellCommand(cmd: string): string[] {
+  const segs: string[] = [];
   let i = 0;
-  let depthParen = 0;       // $( ... )
-  let depthBacktick = 0;    // ` ... `
   let cur = "";
-  const subs = [];          // dolaylı çağrılan alt-komutlar
+  const subs: string[] = [];
 
   const flush = () => {
     const t = cur.trim();
@@ -85,14 +72,12 @@ export function splitShellCommand(cmd) {
     const c = cmd[i];
     const next = cmd[i + 1];
 
-    // Backslash-escape — bir sonraki karakteri olduğu gibi kabul et
     if (c === "\\" && i + 1 < cmd.length) {
       cur += c + cmd[i + 1];
       i += 2;
       continue;
     }
 
-    // Tek tırnaklı blok: içinde hiçbir şey yorumlanmaz
     if (c === "'") {
       const end = cmd.indexOf("'", i + 1);
       if (end < 0) { cur += cmd.slice(i); break; }
@@ -101,13 +86,11 @@ export function splitShellCommand(cmd) {
       continue;
     }
 
-    // Çift tırnaklı blok: içinde $() ve `` hâlâ yorumlanır → karakter karakter ilerle
     if (c === '"') {
       cur += c; i++;
       while (i < cmd.length && cmd[i] !== '"') {
-        if (cmd[i] === "\\" && i + 1 < cmd.length) { cur += cmd[i] + cmd[i + 1]; i += 2; continue; }
+        if (cmd[i] === "\\" && i + 1 < cmd.length) { cur += (cmd[i] ?? "") + (cmd[i + 1] ?? ""); i += 2; continue; }
         if (cmd[i] === "$" && cmd[i + 1] === "(") {
-          // Alt-komut: parantezi bul, içeriği subs'a koy
           const start = i;
           let depth = 1; i += 2;
           while (i < cmd.length && depth > 0) {
@@ -128,13 +111,12 @@ export function splitShellCommand(cmd) {
           i++;
           continue;
         }
-        cur += cmd[i]; i++;
+        cur += cmd[i] ?? ""; i++;
       }
       if (i < cmd.length) { cur += cmd[i]; i++; }
       continue;
     }
 
-    // $( ... )  alt-komut
     if (c === "$" && next === "(") {
       const start = i;
       let depth = 1; i += 2;
@@ -148,7 +130,6 @@ export function splitShellCommand(cmd) {
       continue;
     }
 
-    // backtick alt-komut
     if (c === "`") {
       const start = i; i++;
       while (i < cmd.length && cmd[i] !== "`") {
@@ -161,66 +142,55 @@ export function splitShellCommand(cmd) {
       continue;
     }
 
-    // Separator'lar: ; && || |
     if (c === ";") { flush(); i++; continue; }
     if (c === "&" && next === "&") { flush(); i += 2; continue; }
     if (c === "|" && next === "|") { flush(); i += 2; continue; }
     if (c === "|") { flush(); i++; continue; }
-    if (c === "&" && next !== "&") { flush(); i++; continue; } // arka plan
+    if (c === "&" && next !== "&") { flush(); i++; continue; }
 
     cur += c;
     i++;
   }
   flush();
 
-  // Alt-komutları da segmentlere ekle (recursive parse)
   for (const sub of subs) {
     for (const s of splitShellCommand(sub)) segs.push(s);
   }
   return segs;
 }
 
-const RANK = { safe: 0, approve: 1, forbidden: 2 };
+const RANK: Record<RiskLevel, number> = { safe: 0, approve: 1, forbidden: 2 };
 
-/**
- * Tek bir segmentin (zincirleme olmayan) risk sınıfını döndürür.
- */
-function classifySegment(seg) {
+function classifySegment(seg: string): SegmentClassification {
   for (const pat of FORBIDDEN_PATTERNS) {
-    if (pat.test(seg)) return { level: "forbidden", reason: `Yasaklı kalıp: ${pat}` };
+    if (pat.test(seg)) return { segment: seg, level: "forbidden", reason: `Yasaklı kalıp: ${pat}` };
   }
   if (isAlwaysDenied(seg)) {
-    return { level: "forbidden", reason: "Kullanıcı kalıcı olarak yasaklamış" };
+    return { segment: seg, level: "forbidden", reason: "Kullanıcı kalıcı olarak yasaklamış" };
   }
   if (isAlwaysAllowed(seg)) {
-    return { level: "safe", reason: "Kullanıcı tarafından kalıcı izinli" };
+    return { segment: seg, level: "safe", reason: "Kullanıcı tarafından kalıcı izinli" };
   }
   for (const pat of APPROVAL_PATTERNS) {
-    if (pat.test(seg)) return { level: "approve", reason: `Riskli kalıp: ${pat}` };
+    if (pat.test(seg)) return { segment: seg, level: "approve", reason: `Riskli kalıp: ${pat}` };
   }
   for (const prefix of SAFE_PREFIXES) {
     if (seg === prefix || seg.startsWith(prefix + " ")) {
-      return { level: "safe" };
+      return { segment: seg, level: "safe" };
     }
   }
-  return { level: "approve", reason: "Bilinmeyen komut — emniyet için onay isteniyor" };
+  return { segment: seg, level: "approve", reason: "Bilinmeyen komut — emniyet için onay isteniyor" };
 }
 
-/**
- * Tüm komutu (zincirleme dahil) sınıflandırır. En yüksek risk seviyesi kazanır.
- * Reason, riski tetikleyen segmenti ve kuralı söyler.
- *
- * @returns {{level: "safe"|"approve"|"forbidden", reason?: string, segments?: Array}}
- */
-export function classifyCommand(cmd) {
+export function classifyCommand(cmd: string): Classification {
   const segs = splitShellCommand(cmd);
   if (segs.length === 0) return { level: "safe", segments: [] };
 
-  let worst = { level: "safe" };
-  const annotated = [];
+  let worst: Classification = { level: "safe" };
+  const annotated: SegmentClassification[] = [];
   for (const seg of segs) {
     const r = classifySegment(seg);
-    annotated.push({ segment: seg, ...r });
+    annotated.push(r);
     if (RANK[r.level] > RANK[worst.level]) {
       worst = { level: r.level, reason: `[${seg}] ${r.reason || ""}`.trim() };
     }
@@ -228,12 +198,16 @@ export function classifyCommand(cmd) {
   return { ...worst, segments: annotated };
 }
 
-// Dosya yazma işlemleri için yol kontrolü.
-const FORBIDDEN_WRITE_PATHS = [
+const FORBIDDEN_WRITE_PATHS: readonly string[] = [
   "/etc", "/usr", "/bin", "/sbin", "/var", "/System", "/Library",
 ];
 
-export function classifyWritePath(absPath) {
+export interface WritePathClassification {
+  level: "approve" | "forbidden";
+  reason?: string;
+}
+
+export function classifyWritePath(absPath: string): WritePathClassification {
   for (const p of FORBIDDEN_WRITE_PATHS) {
     if (absPath === p || absPath.startsWith(p + "/")) {
       return { level: "forbidden", reason: `Sistem dizini: ${p}` };

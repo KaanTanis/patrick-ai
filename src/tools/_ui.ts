@@ -1,17 +1,19 @@
-// Tool UI helper'ları — kutular, badge'ler, indent'ler tek yerden.
 import pc from "picocolors";
+import type { RiskLevel } from "../types.js";
 
-export function riskBadge(level) {
+export function riskBadge(level: RiskLevel): string {
   if (level === "safe") return pc.green("SAFE");
   if (level === "approve") return pc.yellow("ONAY");
   return pc.red("YASAK");
 }
 
-/**
- * Konsola "öneri kutusu" basar.
- * rows: [["amaç","..."], ["cmd", "..."], ...]
- */
-export function renderProposal({ title, rows, multilineKey }) {
+interface ProposalOpts {
+  title: string;
+  rows: Array<[string, string]>;
+  multilineKey?: string;
+}
+
+export function renderProposal({ title, rows, multilineKey }: ProposalOpts): void {
   console.log();
   console.log(pc.dim(`┌─ ${title}`));
   for (const [k, v] of rows) {
